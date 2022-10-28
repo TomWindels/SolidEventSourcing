@@ -1,6 +1,7 @@
-import { extractTimestampFromLiteral, TREE, turtleStringToStore } from "@treecg/versionawareldesinldp";
-import { Quad, Quad_Subject, Store, DataFactory, Literal } from "n3";
+import { RDF, TREE, turtleStringToStore } from "@treecg/versionawareldesinldp";
+import { Quad, Quad_Subject, Store, DataFactory, NamedNode } from "n3";
 const namedNode = DataFactory.namedNode;
+const literal = DataFactory.literal;
 import { Resource } from "./EventSource";
 import { existsSync, readFileSync } from "fs";
 
@@ -72,6 +73,73 @@ export async function storeFromFile(filepath: string): Promise<Store> {
         }
     }
     return resources;
+}
+
+/**
+ * Generates a shape representation (collection of `Quad`s, `Resource`) of
+ * the given resource
+ *  note: This method has to be used on a single unit resource (not a
+ *  collection/batch of unrelated units)
+ * @param resource The single resource (as well as its properties, as obtained
+ *  from `extractResources`)
+ * @param eventStreamURI The URL of the LDESinLDP container, used as a prefix for
+ *  the shape types
+ * @returns {Resource} a collection of `Quad`s (`Resource`) representing the shape
+ */
+export function generateShape(resource: Resource, eventStreamURI: string): Resource {
+    const shape : Quad[] = [];
+    const subjects = new Map<string, NamedNode>();
+    const sh = "http://www.w3.org/ns/shacl#";
+    const nodeKinds = {
+        "Literal": sh + "Literal",
+        "Variable": sh + "Literal",
+        "BlankNode": sh + "BlankNodeOrIRI",
+        "NamedNode": sh + "IRI"
+    };
+    const resourceStore = new Store(resource);
+    const extractValue = (val: string) => ( val.match(/.+[\/#]([a-zA-Z0-9_\-]*)$/)![1] );
+    // all named nodes (with type) gets added to the store first
+    for (const quad of resourceStore.getQuads(null, RDF.type, null, null)) {
+        // every unique named node subject gets its own sh:NodeShape
+        const subj = namedNode(eventStreamURI + extractValue(quad.object.value) + 'Shape');
+        shape.push(new Quad(
+            subj, namedNode(RDF.type), namedNode(sh + "NodeShape")
+        ));
+        // adding its type as sh:targetClass
+        shape.push(new Quad(
+            subj, namedNode(sh + "targetClass"), quad.object
+        ));
+        // mark as processed by caching this subj
+        subjects.set(quad.subject.id, subj);
+    }
+    // all other properties found in the resource now gets added
+    for (const quad of resource) {
+        // all properties (except for rdf:type) map to a sh:property
+        if (quad.predicate.id === RDF.type) {
+            continue;
+        }
+        const subj = subjects.get(quad.subject.id);
+        if (!subj) {
+            // no type known, skipping
+            // message below can be enabled to debug missing values
+            // console.log(`Skipping ${quad.subject.value} for shape generation`);
+            continue;
+        }
+        const obj = namedNode(eventStreamURI + extractValue(quad.predicate.value) + "Property");
+        shape.push(new Quad(subj, namedNode(sh + "property"), obj));
+        shape.push(new Quad(obj, namedNode(RDF.type), namedNode(sh + "propertyShape")));
+        shape.push(new Quad(obj, namedNode(sh + "path"), quad.predicate));
+        shape.push(new Quad(obj, namedNode(sh + "nodeKind"), namedNode(nodeKinds[quad.object.termType])));
+        shape.push(new Quad(obj, namedNode(sh + "minCount"), literal(1)));
+        let objNode;
+        if (objNode = subjects.get(quad.object.id)) {
+            // add a relation to its quad.object.id shape node name
+            // this can throw if rdf:type was not defined, but this is by design
+            // as the resource is considered incomplete in that case
+            shape.push(new Quad(obj, namedNode(sh + "node"), objNode));
+        }
+    }
+    return shape;
 }
 
 /**
