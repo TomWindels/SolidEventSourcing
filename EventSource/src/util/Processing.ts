@@ -131,6 +131,10 @@ export function generateShape(resource: Resource, eventStreamURI: string): Resou
         shape.push(new Quad(obj, namedNode(sh + "path"), quad.predicate));
         shape.push(new Quad(obj, namedNode(sh + "nodeKind"), namedNode(nodeKinds[quad.object.termType])));
         shape.push(new Quad(obj, namedNode(sh + "minCount"), literal(1)));
+        // max count is equal to the number of objects matching this exact query
+        shape.push(new Quad(obj, namedNode(sh + "maxCount"), literal(
+            resourceStore.getObjects(quad.subject, quad.predicate, null).length
+        )));
         let objNode;
         if (objNode = subjects.get(quad.object.id)) {
             // add a relation to its quad.object.id shape node name
