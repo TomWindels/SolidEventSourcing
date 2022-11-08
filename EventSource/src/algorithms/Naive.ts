@@ -8,7 +8,7 @@
  * Created on 09/06/2022
  *****************************************/
 
-import {addResourcesToBuckets, calculateBucket, getTimeStamp, Resource} from "../util/EventSource";
+import {addResourcesToBuckets, addShapeToLil, calculateBucket, getTimeStamp, Resource} from "../util/EventSource";
 import {
     extractLdesMetadata,
     LDESinLDP,
@@ -39,7 +39,7 @@ const {quad, namedNode} = DataFactory
  *    * 1000 resources (Resource[])
  *    * version ID
  */
-export async function naiveAlgorithm(lilURL: string, resources: Resource[], versionID: string, bucketSize: number, config: LDESConfig, prefixes: any, session?: Session, loglevel: string = 'info'): Promise<void> {
+export async function naiveAlgorithm(lilURL: string, resources: Resource[], versionID: string, bucketSize: number, config: LDESConfig, prefixes: any, shape?: Resource, session?: Session, loglevel: string = 'info'): Promise<void> {
 
     const logger = new Logger(naiveAlgorithm.name, loglevel)
 
@@ -66,6 +66,11 @@ export async function naiveAlgorithm(lilURL: string, resources: Resource[], vers
     const comm = session ? new SolidCommunication(session) : new LDPCommunication();
     const lil = new LDESinLDP(lilURL, comm);
     await lil.initialise(config);
+    if (shape) {
+        // TODO: this can be improved by either taking in the eventStreamURI or the name of
+        // the stream as parameter
+        await addShapeToLil(lilURL + "#EventStream", shape, prefixes, comm);
+    }
 
     performance.mark(step1);
     // step 2: add all resources to correct bucket

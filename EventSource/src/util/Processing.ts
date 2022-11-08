@@ -82,11 +82,13 @@ export async function storeFromFile(filepath: string): Promise<Store> {
  *  collection/batch of unrelated units)
  * @param resource The single resource (as well as its properties, as obtained
  *  from `extractResources`)
- * @param eventStreamURI The URL of the LDESinLDP container, used as a prefix for
+ * @param eventStreamURL The URL of the LDESinLDP container, used as a prefix for
  *  the shape types
  * @returns {Resource} a collection of `Quad`s (`Resource`) representing the shape
  */
-export function generateShape(resource: Resource, eventStreamURI: string): Resource {
+export function generateShape(resource: Resource, eventStreamURL: string): Resource {
+    // TODO: maybe create a generateShape(Resource[] ...) method which would use most extreme
+    // properties automatically for min and maxCount, and feed it to this method
     const shape : Quad[] = [];
     const subjects = new Map<string, NamedNode>();
     const sh = "http://www.w3.org/ns/shacl#";
@@ -101,7 +103,7 @@ export function generateShape(resource: Resource, eventStreamURI: string): Resou
     // all named nodes (with type) gets added to the store first
     for (const quad of resourceStore.getQuads(null, RDF.type, null, null)) {
         // every unique named node subject gets its own sh:NodeShape
-        const subj = namedNode(eventStreamURI + extractValue(quad.object.value) + 'Shape');
+        const subj = namedNode(eventStreamURL + extractValue(quad.object.value) + 'Shape');
         shape.push(new Quad(
             subj, namedNode(RDF.type), namedNode(sh + "NodeShape")
         ));
@@ -125,7 +127,7 @@ export function generateShape(resource: Resource, eventStreamURI: string): Resou
             // console.log(`Skipping ${quad.subject.value} for shape generation`);
             continue;
         }
-        const obj = namedNode(eventStreamURI + extractValue(quad.predicate.value) + "Property");
+        const obj = namedNode(eventStreamURL + extractValue(quad.predicate.value) + "Property");
         shape.push(new Quad(subj, namedNode(sh + "property"), obj));
         shape.push(new Quad(obj, namedNode(RDF.type), namedNode(sh + "propertyShape")));
         shape.push(new Quad(obj, namedNode(sh + "path"), quad.predicate));

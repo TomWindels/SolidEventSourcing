@@ -1,7 +1,10 @@
 import {
+    Communication,
     extractTimestampFromLiteral,
     LDESMetadata,
     LDPCommunication,
+    storeToString,
+    TREE,
     turtleStringToStore
 } from "@treecg/versionawareldesinldp";
 import {
@@ -17,6 +20,7 @@ import {
     readFileSync
 } from "fs";
 import {Session} from "@rubensworks/solid-client-authn-isomorphic";
+import { generateShape } from "./Processing";
 
 const namedNode = DataFactory.namedNode;
 
@@ -189,7 +193,7 @@ export function resourceToOptimisedTurtle(resource: Resource, _prefixes: any): s
  * @param ldpComm
  * @returns {Promise<void>}
  */
-export async function addResourcesToBuckets(bucketResources: BucketResources, metadata: LDESMetadata, ldpComm: LDPCommunication, prefixes: any) {
+export async function addResourcesToBuckets(bucketResources: BucketResources, metadata: LDESMetadata, ldpComm: LDPCommunication, prefixes: any): Promise<void> {
     for (const containerURL of Object.keys(bucketResources)) {
         for (const resource of bucketResources[containerURL]) {
             const response = await ldpComm.post(containerURL, resourceToOptimisedTurtle(resource, prefixes))
@@ -197,4 +201,98 @@ export async function addResourcesToBuckets(bucketResources: BucketResources, me
             // TODO: handle when status is not 201 (Http Created)
         }
     }
+}
+
+/**
+ * Checks if the stream at `eventStreamURL` with name `eventStreamID` has a shape set
+ * 
+ * @param eventStreamURL
+ * @param eventStreamID
+ * @param comm
+ * @returns {Promise<boolean>}
+ */
+export async function streamHasShape(
+    eventStreamURL: string,
+    eventStreamID: string,
+    comm: Communication = new LDPCommunication()
+): Promise<boolean> {
+    // looking for all triples with subject eventStreamURI located at eventStreamURL
+    const store = await turtleStringToStore(
+        await (await comm.get(eventStreamURL + ".meta")).text()
+    )
+    // check if there are quads having a tree.shape member
+    return store.getQuads(`${eventStreamURL}#${eventStreamID}`, TREE.shape, null, null).length != 0;
+}
+
+/**
+ * Similar to `addShapeToLil`, but creates a shape based on the resource
+ * 
+ * @param eventStreamURI The entire event stream URI (e.g. http://localhost:3000/stream#EventStream)
+ * @param resource A single resource, used to generate a shape with
+ * @param resourcePrefixes (optional) Prefixes used to represent the resource in a bucket (for a more compact turtle string)
+ * @param comm (optional) Communication that should be used (e.g. existing Solid session)
+ * @param shapeLocation (optional) Name of the shape resource
+ * @returns {Promise<boolean>} `true` on success, `false` when a shape is already present.
+ * Throws Error() when requests are unsuccessful
+ */
+export async function addShapeToLilFromResource(
+    eventStreamURI: string,
+    resource: Resource,
+    resourcePrefixes: any = {},
+    comm: Communication = new LDPCommunication(),
+    shapeLocation: string = "shape.shacl"
+) : Promise<boolean> {
+    const [eventStreamURL, /* Unused eventStreamID */] = eventStreamURI.split("#");
+    const shape = generateShape(resource, eventStreamURL);
+    return await addShapeToLil(
+        eventStreamURI, shape, resourcePrefixes, comm, shapeLocation
+    );
+}
+
+/**
+ * Adds a shape to the given event stream, by publishing the shape.shacl file with given prefixes
+ * and adding the tree:shape triple to the LDES metadata
+ * 
+ * @param eventStreamURI The entire event stream URI (e.g. http://localhost:3000/stream#EventStream)
+ * @param shape The shape that should be published (not validated here)
+ * @param resourcePrefixes (optional) Prefixes used to represent the resource in a bucket (for a more compact turtle string)
+ * @param comm (optional) Communication that should be used (e.g. existing Solid session)
+ * @param shapeLocation (optional) Name of the shape resource
+ * @returns {Promise<boolean>} `true` on success, `false` when a shape is already present.
+ * Throws Error() when requests are unsuccessful
+ */
+ export async function addShapeToLil(
+    eventStreamURI: string,
+    shape: Resource,
+    resourcePrefixes: any = {},
+    comm: Communication = new LDPCommunication(),
+    shapeLocation = "shape.shacl"
+): Promise<boolean> {
+    const [eventStreamURL, eventStreamID] = eventStreamURI.split("#");
+    // 0: check if shape is present first
+    if (await streamHasShape(eventStreamURL, eventStreamID, comm)) {
+        return false;
+    }
+    // 1: publish the shape resource using resourceToOptimisedTurtle &
+    // ldpComm.post to a new shape, as well as using prefixes with shape support
+    let response = await comm.put(
+        eventStreamURL + shapeLocation,
+        resourceToOptimisedTurtle(
+            shape, {...resourcePrefixes, "sh": "http://www.w3.org/ns/shacl#", "": eventStreamURL}
+        )
+    );
+    if (response.status < 200 || 299 < response.status) {
+        throw Error(`Error occurred while adding shape content; got status ${response.status} - ${response.statusText}`);
+    }
+    // 2: update ldes metadata to add tree:shape
+    const updateStore = new Store([new Quad(
+        namedNode(eventStreamURI),
+        namedNode(TREE.shape),
+        namedNode(eventStreamURL + shapeLocation)
+    )]);
+    response = await comm.patch(eventStreamURL + ".meta", `INSERT DATA {${storeToString(updateStore)}}`);
+    if (response.status < 200 || 299 < response.status) {
+        throw Error(`Error occurred while setting shape property to LDES; got status ${response.status} - ${response.statusText}`);
+    }
+    return true;
 }

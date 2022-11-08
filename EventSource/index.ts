@@ -31,12 +31,14 @@ import {
     getTimeStamp,
     initSession,
     prefixesFromFilepath,
-    resourceToOptimisedTurtle
+    resourceToOptimisedTurtle,
+    Resource
 } from "./src/util/EventSource";
 import {
     storeFromFile,
     extractResources,
-    batchResources
+    batchResources,
+    generateShape
 } from "./src/util/Processing";
 import { naiveAlgorithm } from "./src/algorithms/Naive";
 import { Logger } from "@treecg/versionawareldesinldp/dist/logging/Logger";
@@ -110,6 +112,20 @@ async function run() {
         logger.info(`No valid source data found. Exiting...`);
         return;
     }
+    // parsing shape argument (either `undefined` (== "None"), "Disabled" or filepath)
+    // generating a shape based on a single resource if requested
+    const shapeArg = process.argv[12];
+    let shape: Resource | undefined;
+    if (!shapeArg || shapeArg === "None") {
+        // automatic shape generation based on resources
+        shape = generateShape(sourceResources[0], lilURL);
+    } else if (shapeArg === "Disabled") {
+        // skipping shape generation, publishers don't have to add a shape to the metadata
+        shape = undefined
+    } else {
+        // interpret shape param as path
+        shape = (await storeFromFile(shapeArg)).getQuads(null, null, null, null);
+    }
     // grouping resources from sourceResources together based on size of a single resource and the target resource
     // size
     // assume every sourceResource entry is of the same length (on average) to calculate the number of resources
@@ -131,7 +147,7 @@ async function run() {
 
     logger.info(`Resources per UUID: ${resourceGroupCount}`)
     logger.info("Naive algorithm: Execution for " + amountResources + " resources with a bucket size of " + bucketSize);
-    await naiveAlgorithm(lilURL, resources.slice(0, amountResources), versionIdentifier, bucketSize, config, prefixes, session, loglevel);
+    await naiveAlgorithm(lilURL, resources.slice(0, amountResources), versionIdentifier, bucketSize, config, prefixes, shape, session, loglevel);
     // Note: currently removed as otherwise no time will be used. Now it might not close when authenticated
     // process.exit()
 }
