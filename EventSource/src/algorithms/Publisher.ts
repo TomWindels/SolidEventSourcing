@@ -1,10 +1,26 @@
 import { literal, namedNode } from "@rdfjs/data-model";
-import { Communication, LDES, LDESinLDP, MetadataParser, TREE, ViewDescription } from "@treecg/versionawareldesinldp";
+import { 
+    BucketizeStrategy,
+    Communication,
+    LDES,
+    LDESinLDP,
+    LDESinLDPClient,
+    LDP,
+    MetadataParser,
+    patchSparqlUpdateInsert,
+    TREE,
+    turtleStringToStore,
+    ViewDescription
+} from "@treecg/versionawareldesinldp";
 import { Logger } from "@treecg/versionawareldesinldp/dist/logging/Logger";
-import { Store } from "n3";
+import { Quad, Store } from "n3";
 import { Resource } from "../util/EventSource";
 
-abstract class Publisher {
+/**
+ * Base Publisher class for timeseries data publishing, with buckets using a date representation
+ * Different implementations use different strategies, having their own benefits and drawbacks
+ */
+export abstract class Publisher {
 
     // methods that should be available to publisher users (= interface)
 
@@ -23,23 +39,19 @@ abstract class Publisher {
 
     // internal methods that should be implemented by publisher implementations
 
-    // assigns a resource to a bucket url (can be either an existing or new
-    // bucket url) by providing a date (which is encoded in the bucket url)
-    // when `resource` is undefined, a first general bucket name is expected
-    // e.g. bucketizing per year would have return a 01/01/yyyy - 00:00z date
-    // on resource == undefined
-    protected abstract getBucket(resource?: Resource): Date;
-
+    // implementation specific resource(s) to string converter
     protected abstract generateString(resource: Resource, prefixes: any): string;
-    // TODO: others
 
     // properties only available for reading by publisher implementations
+    private _treePath: string = ""; // when not set, infinity is used
+    protected get treePath(): string { return this._treePath; };
     private _bucketSize: number = Infinity; // when not set, infinity is used
     protected get bucketSize(): number { return this._bucketSize; };
     private _samplesPerResource: number = Infinity; // when not set, infinity is used
     protected get samplesPerResource(): number { return this._samplesPerResource; };
     private _buckets: Date[] = [];
     protected get buckets(): Date[] { return this._buckets; };
+    protected readonly logger: Logger;
 
     public get uri() : string {
         return this.lil.LDESinLDPIdentifier;
@@ -48,7 +60,6 @@ abstract class Publisher {
         return this.lil.LDESinLDPIdentifier.substring(0, this.lil.LDESinLDPIdentifier.indexOf("#"));
     }
 
-    private logger: Logger;
     private comm: Communication;
     private lil: LDESinLDP;
     private prefixes: any;
@@ -73,8 +84,9 @@ abstract class Publisher {
      * @param config The config for the LIL, only used when there was no LIL present
      *  before
      */
-    protected async init(
+    public async init(
         treePath: string,
+        initialDate: Date = new Date(),
         options: {
             prefixes?: any,
             shape?: {
@@ -89,6 +101,7 @@ abstract class Publisher {
         }
     ): Promise<boolean> {
         this.prefixes = options.prefixes;
+        this._treePath = treePath;
         let status = await this.lil.status();
         let valid: boolean;
         if (!status.found) {
@@ -96,7 +109,7 @@ abstract class Publisher {
             // NOTE: shape is not added here, this is checked for later in a general case
             // for both pre-existing and new LDES's
             await this.lil.initialise({
-                treePath: treePath, pageSize: options.bucketSize, date: this.getBucket()
+                treePath: treePath, pageSize: options.bucketSize, date: initialDate
             });
             // check the status again and re-evaluate
             status = await this.lil.status();
@@ -124,7 +137,20 @@ abstract class Publisher {
                 // new ViewDescription is required, so making one here and using the new store
                 //  from metadata.view as patch data (so the relation to ViewDescription is included
                 //  as well)
-                metadata.view.viewDescription = new ViewDescription(/*TODO*/);
+                metadata.view.viewDescription = new ViewDescription(
+                    this.url + "viewDescription",
+                    new LDESinLDPClient(
+                        this.url + "client",
+                        new BucketizeStrategy(
+                            this.url + "bucketizeStrategy",
+                            LDES.timestampFragmentation,
+                            treePath,
+                            this.bucketSize
+                        )
+                    ),
+                    metadata.eventStreamIdentifier,
+                    metadata.rootNodeIdentifier
+                );
                 newMetadata.addQuads(metadata.view.getStore().getQuads(null, null, null, null));
             } else {
                 // view description already exists, so simply adding the bucket size to its properties
@@ -154,15 +180,21 @@ abstract class Publisher {
             // adding the property to the LDES as well
             newMetadata.addQuad(namedNode(metadata.eventStreamIdentifier), namedNode(TREE.shape), namedNode(shapeURL));
         }
+        // syncing buckets with remote
+        // TODO this.buckets. ...
         // applying all the changes
         const containerIdentifier = this.lil.LDESinLDPIdentifier;
-        const insertBody = patchInsert(newMetadata);
+        const insertBody = patchSparqlUpdateInsert(newMetadata);
         // FIXME check if this is correct: containerIdentifier for patch instead of URL?
         await this.comm.patch(containerIdentifier, insertBody);
         // enabling the internal data manipulation methods
         this._addToBucket = (content: string, bucketUrl: string) => {
-            // TODO: use better general patch method for query generation
+            // manual patching required, as the content is already formed by a
+            //  custom string method
             this.comm.patch(bucketUrl, `INSERT DATA {${content}}`)
+        }
+        this._removeFromBucket = (subject: string, bucketUrl: string) => {
+            // TODO
         }
         this._createBucket = (date: Date) => {
             // chosen date for bucket name depends on the implementation
@@ -174,29 +206,55 @@ abstract class Publisher {
         return true;
     }
 
-    // adds the resource (already in string representation) to a bucket,
-    // with the bucket being selected by an implementation specific approach
-    protected async append(resource: Resource) {
-        // using the bucket created by the implementation
-        const bucket = this.getBucket(resource);
-        const bucketUrl = this.url + bucket;
+    // adds the resource (already in string representation) to a bucket
+    protected async append(resource: Resource, bucket: Date) {
+        const bucketUrl = this.url + bucket.getTime();
         if (!this._buckets.includes(bucket)) {
             // creating a new bucket
             this._createBucket(bucket);
             // adding the bucket to the list of known buckets
             this._buckets.push(bucket);
+            // resorting buckets
+            this._buckets.sort();
         }
-        // TODO: check in metadata if bucket url exists
-        // create bucket if required
         const additionalBucketContent = this.generateString(resource, this.prefixes);
         // adding resource to bucket using internal method
         this._addToBucket(additionalBucketContent, bucketUrl);
+    }
+
+    // moves the resource (by subject) from the original bucket to the new one
+    protected async move(resource: string, from: Date, to: Date) {
+        // as a check, see that the original bucket still has the resource
+        // TODO: in a locked context, this check wouldnt be required
+        if ((await this.getMembers(from)).indexOf(resource) == -1) {
+            this.logger.error(`Tried to move resource "${resource}" from bucket "${from.getTime()}", but it was not found.`);
+            return;
+        }
+        // get the resource data from the original bucket
+        // TODO
+        const data: Resource = []
+        // remove from original bucket
+        this._removeFromBucket(resource, this.url + from.getTime());
+        // add the original data to the new bucket
+        this.append(data, to);
+    }
+
+    protected async getMembers(bucket: Date): Promise<string[]> {
+        const bucketUrl = this.url + bucket.getTime();
+        const containerResponse = await this.comm.get(bucketUrl);
+        return (await turtleStringToStore(await containerResponse.text(), bucketUrl))
+            .getQuads(bucketUrl, LDP.contains, null, null)
+            .map((quad: Quad) => { return quad.subject.value });
     }
 
     // private helper methods only protected methods here can use
     // initially non functioning, can only be enabled after calling init(), and
     // containing a valid LIL structure
     private _addToBucket = (content: string, bucketUrl: string): void => {
+        throw Error("Publisher was either not initialised, or is no longer valid");
+    }
+
+    private _removeFromBucket = (subject: string, bucketUrl: string): void => {
         throw Error("Publisher was either not initialised, or is no longer valid");
     }
 
