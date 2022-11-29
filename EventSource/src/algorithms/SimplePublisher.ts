@@ -10,8 +10,8 @@ class SimplePublisher extends Publisher {
 
     bucketData: [Date, string[]][] = new Array();
 
-    constructor(communication: Communication, ldesURI: string) {
-        super(communication, ldesURI);
+    constructor(communication: Communication, ldesURL: string) {
+        super(communication, ldesURL);
     }
 
     public async publish(resource: Resource | Resource[]): Promise<void> {

@@ -66,13 +66,24 @@ export abstract class Publisher {
 
     constructor(
         comm: Communication,
-        uri: string,
+        url: string,
         logger?: Logger
     ) {
         this.comm = comm;
         this.logger = logger ?? new Logger(this);
         // cannot use `this.url` yet, as it depends on `this.lil`
-        this.lil = new LDESinLDP(uri.substring(0, uri.indexOf("#")), this.comm);
+        // checking wether or not the URL is valid (and not ending on #EventStream)
+        try {
+            const test = new URL(url)
+            if (url.endsWith("#EventStream")) {
+                url = url.substring(0, url.length - "#EventStream".length);
+            }
+            this.lil = new LDESinLDP(url, this.comm);
+        } catch (e) {
+            logger?.error(`Invalid URL used for the creation of a LIL (Publisher): ${url}`);
+            // throwing the error back as the Publisher is invalid
+            throw e;
+        }
     }
 
     // internal methods used by publisher implementations
